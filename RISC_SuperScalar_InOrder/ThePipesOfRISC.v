@@ -50,14 +50,15 @@ endmodule
 
 
 
-module ControlCenter(instruction, ALUsel, wen, WBSel, ALUSrc, branch, memwriteen, dirtchanger);
+module ControlCenter(instruction, ALUsel, wen, WBSel, ALUSrc, branch, memwriteen, uses_rd,uses_rs1,uses_rs2);
     input [31:0] instruction;
     wire [6:0] opcode;
     wire [6:0] f7;
     wire [2:0] f3;
     output reg [3:0] ALUsel;
-    output reg dirtchanger; // for dirtying
+    // output reg [1:0] dirtchanger; // for dirtying 1. does it dirty or undirty 2. involved with dirtying? Cancel
     output reg wen,WBSel, ALUSrc, branch, memwriteen;
+    output reg uses_rs2, uses_rs1, uses_rd; // these work for all instr as of Multicycle
     
     assign opcode = instruction[6:0];
     assign f7 = instruction[31:25];
@@ -72,20 +73,29 @@ module ControlCenter(instruction, ALUsel, wen, WBSel, ALUSrc, branch, memwriteen
         memwriteen = 0;
         WBSel = 0;
         wen = 0;
-        dirtchanger = 0;
+        uses_rd = 0;
+        uses_rs1 = 0;
+        uses_rs2 = 0;
+        // dirtchanger = 2'b0;
 
         //ALU stuff
         if (opcode[4:0] == 5'b10011) begin
             ALUsel = {f7[5], f3};
             ALUSrc = opcode[5];     //if 1 then b otherwise immediate
             wen = 1;
-            dirtchanger = 1;
+            uses_rd = 1;
+            uses_rs1 = 1 ;
+            uses_rs2 = opcode[5];   //if 1 then b otherwise immediate
+            // dirtchanger = 2'b11;
         end
 
         //Branch stuff
         else if (opcode == 7'b1100011) begin
             branch = 1;
-         dirtchanger = 0;
+        //  dirtchanger = 2'b00;
+            uses_rd = 0;
+            uses_rs1 = 1;
+            uses_rs2 = 1;
             case(f3)
                 3'b000: ALUsel = 4'b1000;
                 3'b001: ALUsel = 4'b1110;
@@ -99,7 +109,10 @@ module ControlCenter(instruction, ALUsel, wen, WBSel, ALUSrc, branch, memwriteen
         //Store word
         else if (opcode == 7'b0100011) begin
             memwriteen = 1;
-         dirtchanger = 1;
+            uses_rd = 0;
+            uses_rs1 = 1;
+            uses_rs2 = 1;
+            // dirtchanger = 2'b01;
         end 
 
         // Load full word and half word
@@ -108,7 +121,10 @@ module ControlCenter(instruction, ALUsel, wen, WBSel, ALUSrc, branch, memwriteen
             wen = 1;
             ALUSrc = 0;
             ALUsel = 4'b0000;
-         dirtchanger = 1;
+            uses_rd = 1;
+            uses_rs1 = 1;
+            uses_rs2 = 0;
+        //  dirtchanger = 1;
         end
     end
 endmodule
@@ -116,14 +132,14 @@ endmodule
 
 
 module FIFO (instruction_in_dec, clk, stall_S, instruction_out_dec, full,empty);
-    // rs,rt,rd,ALUsel,wen,WBSel,ALUSrc,branch,memwriteen,dirtchanger
-    // 5  5.  5.  4.    1.   1.    1.      1.      1          1.      = 25
-    input [24:0] instruction_in_dec;     // no pipeline reg needed here included it inside this
+    // rs1,rs2,rd,ALUsel,wen,WBSel,ALUSrc,branch,memwriteen, uses rd,rs1,rs2
+    // 5  5.  5.  4.    1.   1.    1.      1.      1             1. 1.   1           = 27
+    input [26:0] instruction_in_dec;     // no pipeline reg needed here included it inside this
     input stall_S,clk;
-    output reg [24:0] instruction_out_dec;
+    output reg [26:0] instruction_out_dec;
     output full,empty;
 
-    reg [24:0] Queue[0:10];
+    reg [26:0] Queue[0:10];
     reg [3:0] head = 0, tail = 0;
     reg [4:0] count = 0;
 
@@ -151,24 +167,61 @@ endmodule
 
 
 module Scheduler (
-    input [24:0] instr_to_shed_1,
-    input [24:0] instr_to_shed_2,
-    output [24:0] instr_sheded_1,
-    output [24:0] instr_sheded_2
-)
+    input clk,
+    input [26:0] instr_to_sched_1,
+    input [26:0] instr_to_sched_2,
+    output reg [26:0] instr_scheded_1,
+    output reg [26:0] instr_scheded_2,
+    output reg FIFO_stall
+
+);
 
     reg Scoreboard [0:31];
-    wire dirtchanger1,dirtchanger2,rd1,rd2;
-    assign dirtchanger1 = instr_to_shed_1[0];
-    assign dirtchanger2 = instr_to_shed_2[0];
-    assign rd1 = instr_to_shed_1[21:17];
-    assign rd2 = instr_to_shed_2[21:17];
+    wire uses1_rd, uses1_rs1, uses1_rs2, uses2_rd, uses2_rs1, uses2_rs2;
+    wire [4:0] rs1_1, rs2_1, rd_1;
+    wire [4:0] rs1_2, rs2_2, rd_2;
+    
+
+    wire ready1 = !(uses1_rs1 && Scoreboard[rs1_1]) && !(uses1_rs2 && Scoreboard[rs2_1]);  
+    wire ready2 = !(uses2_rs1 && Scoreboard[rs1_2]) && !(uses2_rs2 && Scoreboard[rs2_2]); 
+
+    assign rs1_1 = instr_to_sched_1[26:22];
+    assign rs2_1 = instr_to_sched_1[21:17];
+    assign rd_1  = instr_to_sched_1[16:12];
+    assign uses1_rd = instr_to_sched_1[2];
+    assign uses1_rs1 = instr_to_sched_1[1];
+    assign uses1_rs2 = instr_to_sched_1[0];
+
+
+    assign rs1_2 = instr_to_sched_2[26:22];
+    assign rs2_2 = instr_to_sched_2[21:17];
+    assign rd_2  = instr_to_sched_2[16:12];
+    assign uses2_rd = instr_to_sched_2[2];
+    assign uses2_rs1 = instr_to_sched_2[1];
+    assign uses2_rs2 = instr_to_sched_2[0];
+ 
 
     always @(posedge clk) begin
-        if(dirtchanger1) begin
-            Scoreboard[rd1] = 
+        FIFO_stall <= 0;
+        
+        if (ready1) begin
+            instr_scheded_1 <= instr_to_sched_1;
+            if (uses1_rd) Scoreboard[rd_1] <= 1;
+            
+        end else begin
+            instr_scheded_1 <= 27'b0;  // nop
         end
 
+        if (ready2 && ready1 &&!(uses2_rs1 && (rs1_2 == rd_1)) &&  !(uses2_rs2 && (rs2_2 == rd_1))) begin
+
+            instr_scheded_2 <= instr_to_sched_2;     
+            if (uses2_rd)  Scoreboard[rd_2] <= 1;
+            
+        end
+        else begin
+                instr_scheded_2 <= 27'b0; // nop
+        end
+        
     end
 
 
